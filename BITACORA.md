@@ -348,15 +348,179 @@ En la Fase 1 lo que hicimos solo quedó en el historial de la terminal y en esta
 
 ## Fase 3 · Idempotencia y estado
 
+**Roles en esta fase:** Operadora: Laura · Navegante y Bitácora: Sara · Revisor del plan: Juanjo
+
 ### Evidencias
-- Segundo `apply`, `state list`, `state show`, `serial` antes/después, plan con `-/+`.
+
+**1. Aplicar otra vez sin cambiar nada**
+```
+$ terraform apply
+docker_image.nginx: Refreshing state... [id=sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050eanginx:1.27-alpine]
+docker_container.web: Refreshing state... [id=14949ea8f955b5c103fd7b25e99f51c74bc0f0ad6375c9715c3b2f88a03e861d]
+
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration and found no differences, so no changes are needed.
+
+Apply complete! Resources: 0 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+url = "http://localhost:8080"
+```
+
+**2. Consultar el state con los comandos de Terraform**
+```
+$ terraform state list
+docker_container.web
+docker_image.nginx
+```
+
+```
+$ terraform state show docker_container.web
+# docker_container.web:
+resource "docker_container" "web" {
+    command     = [
+        "nginx",
+        "-g",
+        "daemon off;",
+    ]
+    entrypoint  = [
+        "/docker-entrypoint.sh",
+    ]
+    hostname    = "14949ea8f955"
+    id          = "14949ea8f955b5c103fd7b25e99f51c74bc0f0ad6375c9715c3b2f88a03e861d"
+    image       = "sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea"
+    ipc_mode    = "private"
+    log_driver  = "json-file"
+    must_run    = true
+    name        = "web-g2"
+    network_data = [
+        {
+            gateway          = "172.17.0.1"
+            ip_address       = "172.17.0.2"
+            ip_prefix_length = 16
+            mac_address      = "36:ef:4b:18:5c:81"
+            network_name     = "bridge"
+        },
+    ]
+    network_mode = "bridge"
+    platform     = "linux"
+    runtime      = "runc"
+    shm_size     = 64
+    stop_signal  = "SIGQUIT"
+    working_dir  = "/"
+    ...
+
+    ports {
+        external = 8080
+        internal = 80
+        ip       = "0.0.0.0"
+        protocol = "tcp"
+    }
+}
+```
+(Se recortaron con `...` los atributos vacíos, en `false`, `0` o `null`.)
+
+**3. Lectura de `terraform.tfstate` (solo lectura, sin editar)**
+```
+$ grep -E '"serial"|"lineage"' terraform.tfstate
+  "serial": 4,
+  "lineage": "511fc32e-a01c-f7ec-d783-417ef106caf2",
+```
+La lista `resources` tiene dos entradas, ambas de tipo `managed` y del provider `registry.terraform.io/kreuzwerker/docker`: `docker_image.nginx` y `docker_container.web`, cada una con una instancia. El archivo también guarda `terraform_version` (1.17.0) y el valor del output `url`.
+
+**4. Cambio de versión de imagen:** en `main.tf` se reemplazó `nginx:1.27-alpine` por `nginx:1.28-alpine`.
+```
+$ terraform plan
+...
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+-/+ destroy and then create replacement
+
+Terraform will perform the following actions:
+
+  # docker_container.web must be replaced
+-/+ resource "docker_container" "web" {
+      ~ id    = "14949ea8f955b5c103fd7b25e99f51c74bc0f0ad6375c9715c3b2f88a03e861d" -> (known after apply)
+      ~ image = "sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea" -> (known after apply) # forces replacement
+        name  = "web-g2"
+        ...
+    }
+
+  # docker_image.nginx must be replaced
+-/+ resource "docker_image" "nginx" {
+      ~ id           = "sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050eanginx:1.27-alpine" -> (known after apply)
+      ~ image_id     = "sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050ea" -> (known after apply)
+      ~ name         = "nginx:1.27-alpine" -> "nginx:1.28-alpine" # forces replacement
+      ~ repo_digest  = "nginx@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10" -> (known after apply)
+        # (1 unchanged attribute hidden)
+    }
+
+Plan: 2 to add, 0 to change, 2 to destroy.
+```
+(Del contenedor se dejaron solo los atributos clave; el resto de líneas pasan de su valor actual a `known after apply` o `null`.)
+
+**Aprobación del revisor (Juanjo):** «Aprobado: 2 a crear, 0 a cambiar, 2 a destruir. Hay `-/+` y `forces replacement` en la imagen del contenedor y en el nombre de la imagen».
+
+```
+$ terraform apply
+...
+  Enter a value: yes
+
+docker_container.web: Destroying... [id=14949ea8f955b5c103fd7b25e99f51c74bc0f0ad6375c9715c3b2f88a03e861d]
+docker_container.web: Destruction complete after 1s
+docker_image.nginx: Destroying... [id=sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050eanginx:1.27-alpine]
+docker_image.nginx: Destruction complete after 0s
+docker_image.nginx: Creating...
+docker_image.nginx: Creation complete after 0s [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+docker_container.web: Creating...
+docker_container.web: Creation complete after 1s [id=6121722b6ee533e74568f949ecfa431c37b674638bb61f5564f163d01af3263c]
+
+Apply complete! Resources: 2 added, 0 changed, 2 destroyed.
+
+Outputs:
+
+url = "http://localhost:8080"
+```
+
+**5. Confirmar que todo quedó estable**
+```
+$ terraform plan
+docker_image.nginx: Refreshing state... [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+docker_container.web: Refreshing state... [id=6121722b6ee533e74568f949ecfa431c37b674638bb61f5564f163d01af3263c]
+
+No changes. Your infrastructure matches the configuration.
+
+Terraform has compared your real infrastructure against your configuration and found no differences, so no changes are needed.
+```
+
+```
+$ grep -E '"serial"|"lineage"' terraform.tfstate
+  "serial": 9,
+  "lineage": "511fc32e-a01c-f7ec-d783-417ef106caf2",
+```
 
 ### Respuestas
-1.
-2.
-3.
-4.
-5.
+
+**1. ¿Qué respondió Terraform en el paso 1 y en qué se diferencia del segundo `docker run` de la Fase 1?**
+
+Terraform respondió `No changes. Your infrastructure matches the configuration.` y terminó con `0 added, 0 changed, 0 destroyed`. Antes de decidir, refrescó el estado (`Refreshing state...`), comparó el código con lo que existe en Docker y, como ya coincidían, no hizo nada. En la Fase 1, el segundo `docker run` falló con `Conflict` porque el comando imperativo no revisa lo que ya existe: solo intenta crear. Esto es la idempotencia de la diapositiva: como el botón del ascensor ya pulsado, aplicar lo mismo dos veces no duplica el recurso y, si ya está correcto, no se toca.
+
+**2. ¿Qué datos guarda el state que no escribieron en `main.tf`? ¿Para qué los necesita Terraform?**
+
+En `main.tf` solo escribimos el nombre, la imagen y los puertos. El state además guarda el `id` real del contenedor en Docker, el `image_id` (el hash `sha256` de la imagen), el `repo_digest`, el `hostname`, la red asignada (IP `172.17.0.2`, gateway, MAC), el `command` y el `entrypoint` que trae la imagen, y valores por defecto como `restart = "no"`. También guarda metadatos propios: `serial`, `lineage` y la versión de Terraform. Terraform los necesita para relacionar cada bloque del código con el objeto real que creó (sin el `id` no sabría qué contenedor es `web-g2`) y para calcular el plan: compara lo que pedimos, lo que registró y lo que existe, como dice la diapositiva «El estado (state)».
+
+**3. ¿Por qué el cambio de imagen reemplazó el contenedor en lugar de modificarlo? Relaciónenlo con «Infraestructura mutable vs. inmutable».**
+
+Porque la imagen de un contenedor no se puede cambiar en sitio: un contenedor ya creado queda atado a la imagen de la que partió. El plan lo marcó con `-/+` y `# forces replacement` en el atributo `image`, y en el `apply` se ve el orden: destruir el contenedor viejo, reemplazar la imagen y crear un contenedor nuevo (con otro `id`). Es el enfoque inmutable de la diapositiva: no se entra a "curar" el servidor, se reemplaza completo, así todos los servidores con el mismo código son idénticos y reproducibles. El enfoque mutable sería entrar al contenedor y actualizar nginx a mano, que es justo lo que acumula cambios no documentados.
+
+**4. ¿Cómo cambió `serial` después del `apply` y qué creen que representa?**
+
+Pasó de 4 a 9, mientras que `lineage` se mantuvo igual (`511fc32e-...`). El `serial` es un contador de versiones del state: aumenta cada vez que Terraform escribe un cambio en el archivo. Subió 5 de una vez porque el reemplazo tuvo varios pasos (destruir contenedor, destruir imagen, crear imagen, crear contenedor) y Terraform va guardando el progreso. El `lineage` identifica la "familia" de este state: mientras sea el mismo, es la misma historia de infraestructura. Ambos sirven para evitar que alguien sobrescriba un state más nuevo con uno más viejo o con uno de otro proyecto.
+
+**5. Piensen en un proyecto real con bases de datos: ¿qué riesgo habría si este archivo se subiera a Git?**
+
+El state guarda en texto plano todos los atributos de los recursos, y en un proyecto real eso incluye contraseñas de bases de datos, cadenas de conexión, llaves de acceso, IPs internas y nombres de recursos. Si se sube a Git, cualquiera con acceso al repositorio los ve, y quedan en el historial aunque luego se borre el archivo. Además, si dos personas trabajan con copias del state desde Git, se desincronizan y una puede sobrescribir los cambios de la otra o hacer que Terraform intente recrear o borrar recursos que sí existen. Es el anti-patrón «State sin proteger» y por eso lo excluimos desde la Fase 0 con `*.tfstate` en el `.gitignore`.
 
 ---
 
