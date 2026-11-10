@@ -193,17 +193,156 @@ Vivimos los cuatro:
 
 ---
 
-## Fase 2 · Primer despliegue
+## Fase 2 · Primer despliegue: write → init → plan → apply
+
+**Roles en esta fase:** Operador: Juanjo · Navegante y Bitácora: Laura · Revisora del plan: Sara
 
 ### Evidencias
-- `terraform init`, `terraform validate`, `terraform plan` (línea `Plan:`), aprobación del revisor, `terraform apply`, `terraform output`, `docker ps`, `git status`.
+
+**1. write:** se creó `infra/main.tf` con el bloque `terraform`, el provider `docker`, los recursos `docker_image.nginx` y `docker_container.web` (nombre `web-g2`, puerto 8080 → 80) y el output `url`. En el provider se agregó `host = "npipe:////.//pipe//docker_engine"`, la solución que da la guía para Windows.
+
+**2. init**
+```
+$ terraform init
+Initializing the backend...
+
+Initializing provider plugins...
+- Finding kreuzwerker/docker versions matching "~> 4.6"...
+- Installing kreuzwerker/docker v4.6.0...
+- Installed kreuzwerker/docker v4.6.0 (self-signed, key ID 0DCE698927DAF8EC)
+Partner and community providers are signed by their developers.
+If you'd like to know more about provider signing, you can read about it here:
+https://developer.hashicorp.com/terraform/cli/plugins/signing
+
+Terraform has created a lock file .terraform.lock.hcl to record the provider
+selections it made above. Include this file in your version control repository
+so that Terraform can guarantee to make the same selections by default when
+you run "terraform init" in the future.
+
+Terraform has been successfully initialized!
+```
+
+Lo que apareció en la carpeta después del `init`:
+```
+$ ls -a
+./  ../  .terraform/  .terraform.lock.hcl  main.tf
+```
+
+**3. Formato y sintaxis**
+```
+$ terraform fmt
+
+$ terraform validate
+Success! The configuration is valid.
+```
+
+**4. plan**
+```
+$ terraform plan
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  + create
+
+Terraform will perform the following actions:
+
+  # docker_container.web will be created
+  + resource "docker_container" "web" {
+      + name         = "web-g2"
+      + image        = (known after apply)
+      + must_run     = true
+      + network_mode = "bridge"
+      + start        = true
+      ...
+      + ports {
+          + external = 8080
+          + internal = 80
+          + ip       = "0.0.0.0"
+          + protocol = "tcp"
+        }
+    }
+
+  # docker_image.nginx will be created
+  + resource "docker_image" "nginx" {
+      + id           = (known after apply)
+      + image_id     = (known after apply)
+      + keep_locally = true
+      + name         = "nginx:1.27-alpine"
+      + repo_digest  = (known after apply)
+    }
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + url = "http://localhost:8080"
+```
+(Se recortaron con `...` los atributos del contenedor que Terraform marca como `known after apply` o con su valor por defecto.)
+
+**Aprobación de la revisora (Sara):** «Aprobado: 2 a crear, 0 a cambiar, 0 a destruir».
+
+**5. apply**
+```
+$ terraform apply
+...
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value: yes
+
+docker_image.nginx: Creating...
+docker_image.nginx: Creation complete after 3s [id=sha256:6769dc3a703c719c1d2756bda113659be28ae16cf0da58dd5fd823d6b9a050eanginx:1.27-alpine]
+docker_container.web: Creating...
+docker_container.web: Creation complete after 2s [id=14949ea8f955b5c103fd7b25e99f51c74bc0f0ad6375c9715c3b2f88a03e861d]
+
+Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+
+Outputs:
+
+url = "http://localhost:8080"
+```
+
+**6. Verificación**
+```
+$ terraform output
+url = "http://localhost:8080"
+
+$ docker ps
+CONTAINER ID   IMAGE          COMMAND                  CREATED          STATUS          PORTS                  NAMES
+14949ea8f955   6769dc3a703c   "/docker-entrypoint.…"   32 seconds ago   Up 31 seconds   0.0.0.0:8080->80/tcp   web-g2
+```
+En http://localhost:8080 apareció la página «Welcome to nginx!».
+
+**Punto de control: qué entra a Git**
+```
+$ git status --short -uall
+?? infra/.terraform.lock.hcl
+?? infra/main.tf
+```
+Aunque en `infra/` existen `.terraform/` y `terraform.tfstate`, Git no los ve: los ignora el `.gitignore` (reglas `.terraform/` y `*.tfstate`).
 
 ### Respuestas
-1.
-2.
-3.
-4.
-5.
+
+**1. Pidieron un solo servidor. ¿Cuántos recursos creó el plan y por qué?**
+
+El plan creó 2 recursos: `docker_image.nginx` y `docker_container.web`. Aunque pedimos un solo servidor, en Terraform la imagen también es un recurso que se administra por separado: el contenedor no puede existir sin una imagen de la cual partir. Así Terraform sabe exactamente qué versión de imagen usa el servidor y puede reemplazarlo cuando la imagen cambie.
+
+**2. El contenedor usa `docker_image.nginx.image_id`. ¿Qué orden de creación impone esa referencia? Relaciónenlo con la diapositiva «Qué ocurre cuando aplicas».**
+
+La referencia crea una dependencia implícita: primero se crea la imagen y después el contenedor, porque el contenedor necesita el `image_id` que solo se conoce cuando la imagen existe (por eso el plan mostraba `image = (known after apply)`). El `apply` lo confirma: `docker_image.nginx: Creation complete` aparece antes de `docker_container.web: Creating...`. Esto ocurre en el paso 2 de la diapositiva, «Calcula el plan»: Terraform lee el código, arma el grafo de dependencias y decide el orden; luego, en el paso 3, «Llama al provider» en ese orden, y Docker (paso 4) responde con los datos como el `image_id` y el `id` del contenedor.
+
+**3. ¿Qué descargó `terraform init`, dónde lo guardó y para qué sirve `.terraform.lock.hcl`?**
+
+Descargó el provider `kreuzwerker/docker` versión 4.6.0, el plugin que traduce nuestro código a llamadas a la API de Docker. Lo guardó en la carpeta `.terraform/` dentro de `infra/`, que no se sube a Git porque se puede volver a descargar con `init`. El archivo `.terraform.lock.hcl` registra la versión exacta del provider elegida (4.6.0, dentro del rango `~> 4.6`) y sus firmas, para que todo el equipo y cualquier computador use exactamente la misma versión. Por eso sí se versiona.
+
+**4. De los cuatro bloques de la diapositiva «Cómo se escribe Terraform», ¿cuál no aparece todavía en su archivo?**
+
+Falta el bloque `variable`. Ya tenemos `provider` (docker), `resource` (la imagen y el contenedor) y `output` (`url`), pero valores como el nombre `web-g2` y el puerto 8080 están escritos fijos en el código. Las variables llegan en la Fase 5.
+
+**5. Comparen con la Fase 1: ¿dónde quedó registrado ahora lo que hicieron?**
+
+En la Fase 1 lo que hicimos solo quedó en el historial de la terminal y en esta bitácora. Ahora queda en `infra/main.tf`, un archivo de texto versionado en Git: cualquier persona del grupo, u otro grupo, puede leer qué servidor existe (imagen, nombre, puertos) y recrearlo idéntico con `terraform init` y `terraform apply`. Además, Terraform guarda en `terraform.tfstate` el registro de lo que realmente creó. Esto resuelve los problemas de la Fase 1: es repetible, tiene historial y el conocimiento ya no depende de una persona.
 
 ---
 
