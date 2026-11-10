@@ -1175,18 +1175,360 @@ Que el módulo esté publicado en un lugar accesible y referenciarlo en su `sour
 
 ---
 
-## Fase 7 · State remoto y ambientes
+## Fase 7 · State remoto y varios ambientes
 
-> ⚠️ Nunca pegar aquí la contraseña del backend ni el valor de PG_CONN_STR.
+**Roles en esta fase:** Operadora: Sara · Navegante y Bitácora: Juanjo · Revisora del plan: Laura
 
-### Evidencias
+> 🔒 **Sobre la contraseña del backend:** no usamos la contraseña de ejemplo de la guía; elegimos una propia solo para el taller. En toda esta bitácora aparece como `****`. Nunca se escribió en ningún archivo del repositorio: vive solo en la variable de entorno `PG_CONN_STR` de la terminal y en el contenedor del backend. **Grupo auditor:** para comprobar que no está en el historial, pídannos la contraseña y búsquenla con `git log -p -S "<contraseña>"`; buscar `cambia-esta-clave` siempre dará vacío.
+
+### Parte A · State remoto con bloqueo
+
+**1. Backend levantado por fuera de Terraform** (el lugar donde vive el state debe existir antes de que Terraform lo use)
+```
+$ docker run -d --name tf-state-g2 -e POSTGRES_USER=terraform -e POSTGRES_PASSWORD=**** -e POSTGRES_DB=terraform_backend -p 5433:5432 postgres:17-alpine
+90237a106fc28f7e5216e892810955ed3fd3f4b871ab17928c8bc28b3fc8cba7
+```
+Problemas que tuvimos al levantarlo:
+- El primer intento falló con `docker: invalid reference format` porque pegamos en una sola línea el comando con las `\` de la guía. Lo escribimos en una línea sin barras.
+- En el segundo intento el contenedor quedó con una contraseña distinta a la de `PG_CONN_STR`. Como el backend aún estaba vacío, lo borramos (`docker rm -f tf-state-g2`) y lo creamos de nuevo con la misma contraseña en los dos lados.
+
+**2. Conexión en variable de entorno, no en el código**
+```
+$ export PG_CONN_STR="postgres://terraform:****@localhost:5433/terraform_backend?sslmode=disable"
+```
+
+**3. Backend vacío** dentro del bloque `terraform` de `main.tf`; Terraform completa la conexión con `PG_CONN_STR`:
+```hcl
+  backend "pg" {}
+```
+
+**4. Migración del state**
+```
+$ terraform init -migrate-state
+Initializing the backend...
+Do you want to copy existing state to the new backend?
+  Pre-existing state was found while migrating the previous "local" backend to the
+  newly configured "pg" backend. No existing state was found in the newly
+  configured "pg" backend. Do you want to copy this state to the new "pg"
+  backend? Enter "yes" to copy and "no" to start with an empty state.
+
+  Enter a value: yes
+
+
+Successfully configured the backend "pg"! Terraform will automatically
+use this backend unless the backend configuration changes.
+...
+Terraform has been successfully initialized!
+
+$ terraform state list
+data.docker_network.bridge
+module.blog.docker_container.this
+module.blog.docker_image.this
+module.docs.docker_container.this
+module.docs.docker_image.this
+module.tienda.docker_container.this
+module.tienda.docker_image.this
+
+$ docker exec tf-state-g2 psql -U terraform -d terraform_backend -c "SELECT id, name FROM terraform_remote_state.states;"
+ id |  name
+----+---------
+  1 | default
+(1 row)
+```
+Terraform siguió viendo todos sus recursos, ahora leyéndolos desde PostgreSQL.
+
+**5. Prueba de bloqueo con dos terminales**
+
+Primer intento: en la terminal 1 corrimos `terraform apply`, pero como no había cambios terminó solo (`No changes`) sin pedir confirmación y soltó el bloqueo, así que la terminal 2 pudo planear sin problema. Para que el `apply` se quedara esperando, le dimos algo que proponer:
+
+*Terminal 1* (sin responder la confirmación):
+```
+$ terraform apply -replace=module.tienda.docker_container.this
+...
+Plan: 1 to add, 0 to change, 1 to destroy.
+
+Do you want to perform these actions?
+  Terraform will perform the actions described above.
+  Only 'yes' will be accepted to approve.
+
+  Enter a value:
+```
+
+*Terminal 2* (con su propio `export PG_CONN_STR=...`):
+```
+$ terraform plan
+╷
+│ Error: Error acquiring the state lock
+│
+│ Error message: Workspace is already locked: default
+│ Lock Info:
+│   ID:        516e0521-ba62-3883-0a11-43dd440a68fa
+│   Path:
+│   Operation: OperationTypePlan
+│   Who:       SARA12\estra@Sara12
+│   Version:   1.17.0
+│   Created:   2026-11-10 02:26:46.7701989 +0000 UTC
+│   Info:
+│
+│
+│ Terraform acquires a state lock to protect the state from being written
+│ by multiple users at the same time. Please resolve the issue above and try
+│ again. For most commands, you can disable locking with the "-lock=false"
+│ flag, but this is not recommended.
+╵
+```
+Luego respondimos `no` en la terminal 1, sin reemplazar nada, y el bloqueo se liberó (el `destroy` del paso 6 pudo ejecutarse sin error).
+
+### Parte B · Un mismo código, tres ambientes
+
+**6. Workspace `default` limpio** (antes de cambiar los archivos)
+```
+$ terraform destroy
+...
+Plan: 0 to add, 0 to change, 6 to destroy.
+
+Changes to Outputs:
+  - red_driver = "bridge" -> null
+  - urls       = [
+      - "http://localhost:8081",
+      - "http://localhost:8082",
+      - "http://localhost:8083",
+    ] -> null
+
+Do you really want to destroy all resources?
+  Terraform will destroy all your managed infrastructure, as shown above.
+  There is no undo. Only 'yes' will be accepted to confirm.
+
+  Enter a value: yes
+
+module.tienda.docker_container.this: Destroying... [id=6c785acff042fb2b9ede311266dae554130962efeed4c71b14bf1b92e78d00d3]
+module.docs.docker_container.this: Destroying... [id=7cbaaf8a0b754460a450d52d417e6c9590df08bfd1d3d72da257b784d2b0318f]
+module.blog.docker_container.this: Destroying... [id=30384dfbb5a957eae1ac9fc3a69f8fce48cfb616c03d3a3bb167e3204e80398e]
+module.docs.docker_container.this: Destruction complete after 1s
+module.docs.docker_image.this: Destroying... [id=sha256:dc73b49f...nginx:1.28-alpine]
+module.docs.docker_image.this: Destruction complete after 0s
+module.blog.docker_container.this: Destruction complete after 1s
+module.blog.docker_image.this: Destroying... [id=sha256:dc73b49f...nginx:1.28-alpine]
+module.blog.docker_image.this: Destruction complete after 0s
+module.tienda.docker_container.this: Destruction complete after 1s
+module.tienda.docker_image.this: Destroying... [id=sha256:dc73b49f...nginx:1.28-alpine]
+module.tienda.docker_image.this: Destruction complete after 0s
+
+Destroy complete! Resources: 6 destroyed.
+```
+**Aprobación de la revisora (Laura):** «Aprobado: 0 a crear, 0 a cambiar, 6 a destruir (3 contenedores y 3 imágenes; la red `bridge` no se toca porque es un data source)».
+
+**7. Ambientes descritos en `locals.tf`**
+
+| Ambiente | Puerto base | Sitios | Imagen |
+|---|---|---|---|
+| dev | 8100 | tienda (8101) | `nginx:1.28-alpine` |
+| staging | 8200 | tienda, blog, docs (8201–8203) | `nginx:1.28-alpine` |
+| prod | 8300 | tienda, blog, docs (8301–8303) | `nginx:1.27-alpine` |
+
+**TODO resueltos**
+- **TODO 1** (`locals.tf`): atributo `imagen` en cada ambiente; dev y staging prueban `nginx:1.28-alpine` y prod se queda en `nginx:1.27-alpine` hasta que staging la valide.
+- **TODO 2** (`main.tf`): `imagen = local.amb.imagen` en el `module "sitio"`, que ahora usa `for_each = local.sitios` en lugar de tres bloques.
+- **TODO 3** (`outputs.tf`): `output "urls"` como map `{ for k, m in module.sitio : m.nombre => m.url }`.
+
+**8. Reinicialización.** Como la llamada al módulo cambió de nombre (`module "sitio"`), hubo que ejecutar `terraform init` otra vez:
+```
+$ terraform init
+Initializing the backend...
+
+Initializing modules...
+- sitio in modules\sitio_web
+...
+Terraform has been successfully initialized!
+```
+
+**9. Un despliegue por ambiente**
+
+*dev*
+```
+$ terraform workspace new dev
+Created and switched to workspace "dev"!
+
+You're now on a new, empty workspace. Workspaces isolate their state,
+so if you run "terraform plan" Terraform will not see any existing state
+for this configuration.
+
+$ terraform apply
+...
+  # module.sitio["tienda"].docker_container.this will be created
+  + name = "tienda-g2-dev"   (puerto 8101, «Tienda - DEV - grupo 2»)
+  # module.sitio["tienda"].docker_image.this will be created
+  + name = "nginx:1.28-alpine"
+
+Plan: 2 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + red_driver = "bridge"
+  + urls       = {
+      + tienda-g2-dev = "http://localhost:8101"
+    }
+
+Do you want to perform these actions in workspace "dev"?
+  Enter a value: yes
+...
+Apply complete! Resources: 2 added, 0 changed, 0 destroyed.
+```
+**Laura:** «Workspace dev, 1 sitio: aprobado 2 a crear, 0 a cambiar, 0 a destruir».
+
+*staging*
+```
+$ terraform workspace new staging
+Created and switched to workspace "staging"!
+
+$ terraform apply
+...
+  # module.sitio["blog"].docker_container.this    -> blog-g2-staging   (8202)
+  # module.sitio["docs"].docker_container.this    -> docs-g2-staging   (8203)
+  # module.sitio["tienda"].docker_container.this  -> tienda-g2-staging (8201)
+  # (y una docker_image nginx:1.28-alpine por sitio)
+
+Plan: 6 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + red_driver = "bridge"
+  + urls       = {
+      + blog-g2-staging   = "http://localhost:8202"
+      + docs-g2-staging   = "http://localhost:8203"
+      + tienda-g2-staging = "http://localhost:8201"
+    }
+
+Do you want to perform these actions in workspace "staging"?
+  Enter a value: yes
+...
+Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+```
+**Laura:** «Workspace staging, 3 sitios: aprobado 6 a crear, 0 a cambiar, 0 a destruir».
+
+*prod*
+```
+$ terraform workspace new prod
+Created and switched to workspace "prod"!
+
+$ terraform apply
+...
+  # module.sitio["blog"].docker_container.this    -> blog-g2-prod   (8302)
+  # module.sitio["docs"].docker_container.this    -> docs-g2-prod   (8303)
+  # module.sitio["tienda"].docker_container.this  -> tienda-g2-prod (8301)
+  # module.sitio["..."].docker_image.this         -> name = "nginx:1.27-alpine" (x3)
+
+Plan: 6 to add, 0 to change, 0 to destroy.
+
+Changes to Outputs:
+  + red_driver = "bridge"
+  + urls       = {
+      + blog-g2-prod   = "http://localhost:8302"
+      + docs-g2-prod   = "http://localhost:8303"
+      + tienda-g2-prod = "http://localhost:8301"
+    }
+
+Do you want to perform these actions in workspace "prod"?
+  Enter a value: yes
+
+module.sitio["tienda"].docker_image.this: Creation complete after 0s [id=sha256:6769dc3a703c...nginx:1.27-alpine]
+...
+Apply complete! Resources: 6 added, 0 changed, 0 destroyed.
+```
+**Laura:** «Workspace prod, 3 sitios con imagen 1.27: aprobado 6 a crear, 0 a cambiar, 0 a destruir».
+
+(Los planes se resumieron: se dejaron el nombre, el puerto y la imagen de cada recurso.)
+
+**Verificación**
+```
+$ terraform workspace list
+  default
+  dev
+* prod
+  staging
+
+$ docker exec tf-state-g2 psql -U terraform -d terraform_backend -c "SELECT id, name FROM terraform_remote_state.states;"
+ id |  name
+----+---------
+  1 | default
+  4 | dev
+  6 | staging
+  8 | prod
+(4 rows)
+
+$ docker ps
+CONTAINER ID   IMAGE                COMMAND                  CREATED          STATUS          PORTS                    NAMES
+5e7bb751eb2e   6769dc3a703c         "/docker-entrypoint.…"   20 seconds ago   Up 19 seconds   0.0.0.0:8302->80/tcp     blog-g2-prod
+474c70a44555   6769dc3a703c         "/docker-entrypoint.…"   20 seconds ago   Up 19 seconds   0.0.0.0:8303->80/tcp     docs-g2-prod
+662c154a47d6   6769dc3a703c         "/docker-entrypoint.…"   20 seconds ago   Up 19 seconds   0.0.0.0:8301->80/tcp     tienda-g2-prod
+e29a50aa716a   dc73b49f5124         "/docker-entrypoint.…"   31 seconds ago   Up 31 seconds   0.0.0.0:8203->80/tcp     docs-g2-staging
+1e5562c2d262   dc73b49f5124         "/docker-entrypoint.…"   31 seconds ago   Up 31 seconds   0.0.0.0:8202->80/tcp     blog-g2-staging
+fcaf88612d98   dc73b49f5124         "/docker-entrypoint.…"   31 seconds ago   Up 31 seconds   0.0.0.0:8201->80/tcp     tienda-g2-staging
+f9589feda429   dc73b49f5124         "/docker-entrypoint.…"   44 seconds ago   Up 44 seconds   0.0.0.0:8101->80/tcp     tienda-g2-dev
+90237a106fc2   postgres:17-alpine   "docker-entrypoint.s…"   10 minutes ago   Up 10 minutes   0.0.0.0:5433->5432/tcp   tf-state-g2
+```
+Corren los siete sitios (1 en dev, 3 en staging, 3 en prod) más el contenedor del backend. En la columna `IMAGE` se ve que prod usa la imagen `6769dc3a703c` (1.27) y dev y staging la `dc73b49f5124` (1.28).
+
+**Comparación en el navegador.** Abrimos los tres ambientes y cada uno respondió con su propia página:
+
+| URL | Ambiente | Página |
+|---|---|---|
+| http://localhost:8101 | dev | «Tienda - DEV - grupo 2» / «Sitio tienda-g2-dev, desplegado con Terraform» |
+| http://localhost:8201 | staging | «Tienda - STAGING - grupo 2» / «Sitio tienda-g2-staging, desplegado con Terraform» |
+| http://localhost:8301 | prod | «Tienda - PROD - grupo 2» / «Sitio tienda-g2-prod, desplegado con Terraform» |
+
+Las tres páginas salen del mismo código y del mismo módulo; solo cambian el ambiente (`local.entorno`), el puerto base y la imagen. La consulta del paso 4 la repetimos después de desplegar (arriba): la tabla `states` pasó de una fila (`default`) a cuatro, una por workspace.
+
+**10. El workspace `default` falla a propósito**
+```
+$ terraform workspace select default
+Switched to workspace "default".
+
+$ terraform plan
+╷
+│ Error: Invalid index
+│
+│   on locals.tf line 13, in locals:
+│   13:   amb = local.ambientes[local.entorno]
+│     ├────────────────
+│     │ local.ambientes is object with 3 attributes
+│     │ local.entorno is "default"
+│
+│ The given key does not identify an element in this collection value.
+╵
+
+$ terraform workspace select prod
+Switched to workspace "prod".
+```
+(El mismo error salió antes con `terraform validate`, que ejecutamos por error todavía en `default`.)
+
 ### Respuestas
-1.
-2.
-3.
-4.
-5.
-6.
+
+**1. ¿Qué respondió la terminal 2 en la prueba de bloqueo? ¿Qué problema de trabajo en equipo evita?**
+
+Respondió `Error acquiring the state lock` con el mensaje `Workspace is already locked: default`, y mostró quién tenía el bloqueo (`SARA12\estra`), desde cuándo, con qué versión de Terraform y su ID. Evita que dos personas modifiquen la misma infraestructura al mismo tiempo: sin bloqueo, ambas podrían calcular su plan sobre el mismo state, aplicar cambios que se pisan entre sí y dejar un state que no corresponde a la realidad (uno sobrescribe lo que escribió el otro), o incluso crear recursos duplicados. Es lo que dice la diapositiva «Dónde vive el estado»: el state remoto da bloqueo para evitar cambios simultáneos, algo que el state local no puede ofrecer.
+
+**2. ¿Dónde quedó la contraseña del backend y por qué no debe estar en `main.tf`?**
+
+Quedó solo en dos lugares fuera del repositorio: la variable de entorno `PG_CONN_STR` de la terminal (que desaparece al cerrarla, por eso cada terminal nueva necesita definirla) y la configuración del contenedor `tf-state-g2`. En `main.tf` el bloque `backend "pg" {}` está vacío y Terraform completa la conexión desde la variable. No debe estar en `main.tf` porque ese archivo se versiona: la contraseña quedaría en el historial de Git para siempre, incluso si después se borra, y cualquiera con acceso al repositorio (o a una copia) la tendría. Es el anti-patrón «Secretos en el código» y la buena práctica «Saca los secretos del código».
+
+**3. ¿Qué filas tiene ahora la tabla `states` y cómo se relacionan con los workspaces?**
+
+Tiene cuatro filas: `default` (id 1), `dev` (id 4), `staging` (id 6) y `prod` (id 8), exactamente las mismas que muestra `terraform workspace list`. Cada workspace tiene su propio state, guardado en una fila aparte: por eso, al crear `staging`, Terraform no veía los recursos de `dev` y planeó crear todo desde cero. La fila `default` sigue existiendo aunque esté vacía, porque ahí migramos el state original y luego lo destruimos. Los `id` no son consecutivos, probablemente porque la secuencia de la tabla también se consume en cada escritura que hace el backend; lo importante es que hay una fila por workspace.
+
+**4. ¿Qué error da `terraform plan` en el workspace `default` y por qué es útil que falle?**
+
+Da `Error: Invalid index` en `amb = local.ambientes[local.entorno]`, porque `local.entorno` vale `"default"` y el map `ambientes` solo tiene `dev`, `staging` y `prod`. Es útil porque obliga a elegir explícitamente en qué ambiente se trabaja: si alguien olvida seleccionar el workspace, Terraform se detiene antes de calcular o aplicar nada, en lugar de desplegar en un ambiente sin nombre o con valores que nadie definió. Falla rápido y de forma segura, antes de tocar Docker.
+
+**5. ¿Por qué dev tiene un solo sitio y staging replica a prod? ¿Por qué prod usa otra versión de imagen?**
+
+Siguiendo la diapositiva «Un mismo código, varios ambientes»: **dev** es para probar sin miedo con recursos pequeños y baratos, así que basta con un sitio. **Staging** es una réplica de producción para validar antes de lanzar, por eso tiene los mismos tres sitios que prod: si algo funciona en staging, debería funcionar igual en prod. **Prod** es lo que usan los clientes reales y exige el máximo cuidado, así que se queda con la versión probada (`nginx:1.27-alpine`) mientras la nueva (`1.28-alpine`) se valida en dev y staging. Cuando staging la apruebe, basta con cambiar una línea en `locals.tf` y aplicar en el workspace `prod`.
+
+**6. Los tres ambientes comparten código y backend. ¿Qué riesgo tiene eso frente a usar carpetas separadas por ambiente?**
+
+- **Equivocarse de workspace:** el código no cambia entre ambientes, así que un `apply` en el workspace equivocado (creyendo estar en dev cuando se está en prod) afecta producción. Por eso el revisor dice en voz alta el workspace antes de cada `apply`.
+- **Un cambio de código llega a todos a la vez:** un cambio en el módulo o en `main.tf` aplica a dev, staging y prod en cuanto se ejecute en cada uno; no hay una versión del código «solo para dev». Con carpetas separadas, cada ambiente puede fijar su propia versión del módulo y los cambios se promueven de forma explícita.
+- **Mismo backend y mismas credenciales:** quien puede tocar dev también puede tocar prod, y si el backend falla o se pierde, se pierden los states de los tres ambientes. Con carpetas separadas se puede usar un backend y permisos distintos por ambiente.
+
+La desventaja de las carpetas separadas es que hay más archivos y más riesgo de duplicación, algo que se reduce reutilizando el mismo módulo en todas.
 
 ---
 
