@@ -1534,13 +1534,242 @@ La desventaja de las carpetas separadas es que hay más archivos y más riesgo d
 
 ## Fase 8 · Testing y calidad
 
+**Roles en esta fase:** Operador: Juanjo · Navegante y Bitácora: Laura · Revisora: Sara
+
+Validamos el código en los niveles de la diapositiva «Testing»: análisis estático, pruebas reales en un entorno desechable y escaneo de seguridad. Al final los encadenamos en `validar.sh`, que hace el papel de la etapa «Validar» del pipeline.
+
 ### Evidencias
+
+**1. Análisis estático** (desde `infra/`, en el workspace `prod`)
+```
+$ terraform fmt -check -recursive
+
+$ terraform validate
+Success! The configuration is valid.
+```
+`fmt -check` no imprimió nada: ningún archivo necesitaba reformatearse. No usamos `tflint` porque no está instalado.
+
+**2. Pruebas del módulo con `terraform test`**
+
+Archivo `infra/modules/sitio_web/tests/sitio_web.tftest.hcl` con cuatro pruebas:
+
+| Prueba | Tipo | Qué verifica |
+|---|---|---|
+| `url_coherente_con_puerto` | `plan` | El output `url` es `http://localhost:8999` cuando el puerto es 8999 |
+| `rechaza_puerto_fuera_de_rango` | `plan` | Con `puerto = 9500`, la `validation` falla como se espera (`expect_failures`) |
+| `despliegue_real` | `apply` real | Crea el contenedor de verdad y comprueba que se llame `prueba-g2`; al terminar lo destruye |
+| `nombre_coincide_con_variable` | `plan` | **TODO 1 resuelto:** el output `nombre` coincide con `var.nombre` |
+
+Agregamos al inicio del archivo un bloque `provider "docker"` con `host = "npipe:////.//pipe//docker_engine"`: el módulo no tiene configuración de provider propia y, en Windows, sin ella la prueba `despliegue_real` no encuentra Docker (la misma solución de la tabla de *Problemas frecuentes*).
+
+```
+$ cd modules/sitio_web
+$ terraform init
+Initializing the backend...
+
+Initializing provider plugins...
+- Finding latest version of kreuzwerker/docker...
+- Installing kreuzwerker/docker v4.6.0...
+- Installed kreuzwerker/docker v4.6.0 (self-signed, key ID 0DCE698927DAF8EC)
+...
+Terraform has been successfully initialized!
+
+$ terraform test
+tests\sitio_web.tftest.hcl... in progress
+  run "url_coherente_con_puerto"... pass
+  run "rechaza_puerto_fuera_de_rango"... pass
+  run "despliegue_real"... pass
+  run "nombre_coincide_con_variable"... pass
+tests\sitio_web.tftest.hcl... tearing down
+tests\sitio_web.tftest.hcl... pass
+
+Success! 4 passed, 0 failed.
+```
+
+**Lo que se vio en `docker ps` durante las pruebas.** En el primer intento, quien observaba ejecutó `docker ps --filter name=prueba` a mano dos veces y no vio nada: `despliegue_real` crea y destruye el contenedor en uno o dos segundos. Repetimos la prueba con un ciclo que revisaba cada medio segundo:
+
+*Terminal de observación:*
+```
+$ for i in $(seq 1 60); do docker ps --filter name=prueba --format "{{.Names}}  {{.Ports}}  {{.Status}}"; sleep 0.5; done
+prueba-g2  0.0.0.0:8999->80/tcp  Up 1 second
+```
+*Terminal del operador:*
+```
+$ terraform -chdir=modules/sitio_web test
+...
+Success! 4 passed, 0 failed.
+```
+El contenedor `prueba-g2` apareció en el puerto 8999 durante un instante y luego desapareció solo, sin que nadie lo borrara.
+
+**3. Escaneo de seguridad con Checkov**
+
+Archivo de práctica `seguridad/bucket.tf` (bucket S3 con los cuatro bloqueos de acceso público en `false`); nunca se aplica, solo se escanea.
+
+Instalamos Checkov con `pip install checkov`. El comando `checkov` no quedó en el PATH (el Python de la Microsoft Store instala los ejecutables en una carpeta que no está en el PATH), así que lo ejecutamos como módulo: `python -m checkov.main`. El primer intento lo interrumpimos con Ctrl+C porque tardaba mucho en cargar; la primera ejecución demora alrededor de un minuto.
+
+*Primer escaneo* (bucket público):
+```
+$ python -m checkov.main -d seguridad --compact
+...
+terraform scan results:
+
+Passed checks: 4, Failed checks: 11, Skipped checks: 0
+
+Check: CKV_AWS_93  ... PASSED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_19  ... PASSED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_20  ... PASSED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_57  ... PASSED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_53: "Ensure S3 bucket has block public ACLS enabled"
+        FAILED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_54: "Ensure S3 bucket has block public policy enabled"
+        FAILED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_55: "Ensure S3 bucket has ignore public ACLs enabled"
+        FAILED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_56: "Ensure S3 bucket has 'restrict_public_buckets' enabled"
+        FAILED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV2_AWS_62: "Ensure S3 buckets should have event notifications enabled"
+        FAILED for resource: aws_s3_bucket.evidencias
+Check: CKV2_AWS_61: "Ensure that an S3 bucket has a lifecycle configuration"
+        FAILED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_18: "Ensure the S3 bucket has access logging enabled"
+        FAILED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_144: "Ensure that S3 bucket has cross-region replication enabled"
+        FAILED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_21: "Ensure all data stored in the S3 bucket have versioning enabled"
+        FAILED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_145: "Ensure that S3 buckets are encrypted with KMS by default"
+        FAILED for resource: aws_s3_bucket.evidencias
+Check: CKV2_AWS_6: "Ensure that S3 bucket has a Public Access block"
+        FAILED for resource: aws_s3_bucket.evidencias
+```
+(Se recortaron las líneas `File:` y `Guide:` de cada control.)
+
+*Corrección:* cambiamos los cuatro valores (`block_public_acls`, `block_public_policy`, `ignore_public_acls`, `restrict_public_buckets`) a `true`.
+
+*Segundo escaneo:*
+```
+$ python -m checkov.main -d seguridad --compact
+...
+terraform scan results:
+
+Passed checks: 9, Failed checks: 6, Skipped checks: 0
+
+Check: CKV_AWS_93  ... PASSED
+Check: CKV_AWS_53  ... PASSED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_54  ... PASSED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_55  ... PASSED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_56  ... PASSED for resource: aws_s3_bucket_public_access_block.evidencias
+Check: CKV_AWS_19  ... PASSED
+Check: CKV2_AWS_6  ... PASSED for resource: aws_s3_bucket.evidencias
+Check: CKV_AWS_20  ... PASSED
+Check: CKV_AWS_57  ... PASSED
+Check: CKV2_AWS_62: "Ensure S3 buckets should have event notifications enabled"   FAILED
+Check: CKV2_AWS_61: "Ensure that an S3 bucket has a lifecycle configuration"      FAILED
+Check: CKV_AWS_18: "Ensure the S3 bucket has access logging enabled"              FAILED
+Check: CKV_AWS_144: "Ensure that S3 bucket has cross-region replication enabled"  FAILED
+Check: CKV_AWS_21: "Ensure all data stored in the S3 bucket have versioning enabled" FAILED
+Check: CKV_AWS_145: "Ensure that S3 buckets are encrypted with KMS by default"     FAILED
+```
+
+| | Aprobados | Fallidos |
+|---|---|---|
+| Primer escaneo (bucket público) | 4 | 11 |
+| Segundo escaneo (bloqueos en `true`) | 9 | 6 |
+
+**4. El mini pipeline `validar.sh`** (en la raíz del repositorio)
+```bash
+#!/usr/bin/env bash
+# Etapa "Validar" del pipeline: si cualquier paso falla, el script se detiene (set -e)
+set -e
+
+echo "== 1/4 Formato"
+terraform -chdir=infra fmt -check -recursive
+
+echo "== 2/4 Validación"
+terraform -chdir=infra validate
+
+# TODO 2 resuelto: pruebas del módulo
+echo "== 3/4 Pruebas del módulo"
+terraform -chdir=infra/modules/sitio_web test
+
+# TODO 3 resuelto: política del equipo "sin buckets públicos" (CKV_AWS_53 a CKV_AWS_56).
+# En este computador checkov no está en el PATH, por eso se llama como módulo de Python.
+echo "== 4/4 Política: sin buckets públicos"
+python -m checkov.main -d seguridad --check CKV_AWS_53,CKV_AWS_54,CKV_AWS_55,CKV_AWS_56 --compact
+
+echo "Validación completa: el cambio puede pasar a revisión"
+```
+Agregamos un `echo` antes de cada paso para ver en cuál se detiene. El paso 2 funciona porque el workspace activo es `prod`; en `default`, `validate` falla a propósito (Fase 7).
+
+*Ejecución 1, todo correcto:*
+```
+$ bash validar.sh
+== 1/4 Formato
+== 2/4 Validación
+Success! The configuration is valid.
+
+== 3/4 Pruebas del módulo
+...
+Success! 4 passed, 0 failed.
+== 4/4 Política: sin buckets públicos
+...
+Passed checks: 4, Failed checks: 0, Skipped checks: 0
+...
+Validación completa: el cambio puede pasar a revisión
+```
+
+*Ejecución 2, indentación desordenada a propósito en `infra/data.tf`:*
+```
+$ sed -i 's/^  name = "bridge"/        name = "bridge"/' infra/data.tf
+$ bash validar.sh
+== 1/4 Formato
+data.tf
+```
+Se detuvo en el paso 1 y nunca llegó al mensaje final. Lo corregimos con `terraform -chdir=infra fmt -recursive`.
+
+*Ejecución 3, bucket público otra vez (`block_public_acls = false`):*
+```
+$ sed -i 's/block_public_acls       = true/block_public_acls       = false/' seguridad/bucket.tf
+$ bash validar.sh
+== 1/4 Formato
+== 2/4 Validación
+Success! The configuration is valid.
+
+== 3/4 Pruebas del módulo
+...
+Success! 4 passed, 0 failed.
+== 4/4 Política: sin buckets públicos
+...
+Passed checks: 3, Failed checks: 1, Skipped checks: 0
+...
+Check: CKV_AWS_53: "Ensure S3 bucket has block public ACLS enabled"
+        FAILED for resource: aws_s3_bucket_public_access_block.evidencias
+```
+Pasó formato, validación y pruebas, pero se detuvo en la política y no imprimió el mensaje final. Devolvimos el valor a `true` y la ejecución volvió a terminar con «Validación completa: el cambio puede pasar a revisión».
+
 ### Respuestas
-1.
-2.
-3.
-4.
-5.
+
+**1. ¿Qué encontró cada nivel (estático, pruebas, seguridad) que los otros no podían encontrar?**
+
+- **Análisis estático** (`fmt`, `validate`): encontró la indentación desordenada de `data.tf` sin ejecutar nada. Revisa forma y sintaxis: que el código esté bien escrito y que las referencias existan. Las pruebas y el escaneo no se fijan en el formato.
+- **Pruebas** (`terraform test`): comprobaron el comportamiento del módulo, algo que el análisis estático no puede saber: que la `url` corresponda al puerto, que la validación rechace el 9500 y, sobre todo, que el contenedor se cree de verdad en Docker con el nombre esperado. Un código puede ser válido y aun así no hacer lo que se espera.
+- **Escaneo de seguridad** (Checkov): encontró que el bucket era público. Ese código era sintácticamente válido y se habría desplegado sin error, así que `validate` y las pruebas lo habrían aprobado; solo una revisión con reglas de seguridad detecta que es una mala configuración.
+
+**2. ¿Qué vio quien observaba `docker ps` durante `despliegue_real`? ¿Por qué vale la pena un entorno desechable?**
+
+Vio aparecer el contenedor `prueba-g2` publicado en el puerto 8999 (`Up 1 second`) y desaparecer solo al terminar la prueba. A mano no alcanzó a verlo; hubo que usar un ciclo que revisaba cada medio segundo. Vale la pena porque permite probar el despliegue real sin tocar los ambientes que importan: usa su propio nombre y puerto, no interfiere con los siete sitios de dev, staging y prod que seguían corriendo, se limpia automáticamente (no deja recursos olvidados ni costos en una nube real) y se puede repetir cuantas veces se quiera con el mismo resultado.
+
+**3. ¿Qué controles fallaron en el bucket y cuántos quedaron después de corregir? ¿Cuáles corresponden al ejemplo «sin buckets públicos» de la clase?**
+
+En el primer escaneo fallaron 11: `CKV_AWS_53`, `CKV_AWS_54`, `CKV_AWS_55`, `CKV_AWS_56`, `CKV2_AWS_6`, `CKV2_AWS_62`, `CKV2_AWS_61`, `CKV_AWS_18`, `CKV_AWS_144`, `CKV_AWS_21` y `CKV_AWS_145`. Después de corregir quedaron 6 fallos: notificaciones de eventos (`CKV2_AWS_62`), ciclo de vida (`CKV2_AWS_61`), registro de accesos (`CKV_AWS_18`), replicación entre regiones (`CKV_AWS_144`), versionado (`CKV_AWS_21`) y cifrado con KMS (`CKV_AWS_145`), que en una nube real también habría que atender. Al ejemplo «sin buckets públicos» corresponden `CKV_AWS_53` a `CKV_AWS_56` (bloquear ACL públicas, bloquear políticas públicas, ignorar ACL públicas y restringir buckets públicos). `CKV2_AWS_6`, que pide que el bucket tenga un bloqueo de acceso público efectivo, también pasó al corregir, porque depende de esos mismos cuatro valores.
+
+**4. ¿Qué ventaja tiene detectar un problema en el código, antes del `apply`, frente a detectarlo en la nube?**
+
+Es más barato, más rápido y más seguro. Si el bucket público se detecta en el código, se corrige cambiando una línea y nunca existe en la nube. Si se detecta después del `apply`, el bucket ya estuvo expuesto en internet durante un tiempo (con riesgo real de fuga de datos), probablemente generó costos, hay que hacer otro despliegue para corregirlo y puede que nadie lo note hasta que sea tarde. Como dice la diapositiva de Policy as Code, la idea es validar la infraestructura antes de aplicarla y bloquear automáticamente las configuraciones inseguras.
+
+**5. ¿En qué paso del pipeline de la diapositiva va `validar.sh` y qué paso humano viene después?**
+
+Va en el paso **2 · Validar**, donde el pipeline corre `fmt`, `validate`, el plan y las políticas de forma automática después de cada commit. Nuestro script hace formato, validación, pruebas y política; en un pipeline real también generaría el `plan`. Después viene el paso humano **3 · Revisar**: una persona del equipo lee el plan propuesto y lo aprueba, como hizo nuestro revisor del plan en cada fase. Solo entonces llega el paso **4 · Aplicar**, donde se ejecuta el `apply` de forma controlada.
 
 ---
 
