@@ -720,14 +720,192 @@ Porque en lugar de entrar al contenedor a deshacer el cambio a mano (el enfoque 
 
 ---
 
-## Fase 5 · Flexibilidad
+## Fase 5 · Las piezas que dan flexibilidad
+
+**Roles en esta fase:** Operador: Juanjo · Navegante y Bitácora: Laura · Revisora del plan: Sara
 
 ### Evidencias
+
+**1. Código separado por responsabilidad** (Terraform lee todos los `.tf` de la carpeta como uno solo):
+```
+infra/
+├── main.tf           # terraform, provider y recursos
+├── variables.tf      # entradas: grupo, puerto (con validation), imagen, mensaje
+├── locals.tf         # valores calculados: nombre, html, etiquetas
+├── data.tf           # red "bridge" que se lee sin crear
+├── outputs.tf        # salidas: url, contenedor, red_driver
+└── terraform.tfvars  # grupo = 2, mensaje = "Hola desde el grupo 2"
+```
+
+**TODO resueltos**
+- **TODO 1** (`variables.tf`): variable `mensaje` de tipo `string`, con descripción y sin `default`; su valor llega desde `terraform.tfvars`.
+- **TODO 2** (`locals.tf`): local `etiquetas = { curso = "arquitectura-sw-2", grupo = tostring(var.grupo) }`.
+- **TODO 3, reto** (`main.tf`): bloque `dynamic "labels"` con `for_each = local.etiquetas` y `content { label = labels.key, value = labels.value }`, que genera un bloque `labels` por cada etiqueta.
+- **TODO 4** (`outputs.tf`): `output "contenedor"` con `docker_container.web.name`.
+- **TODO 5** (`outputs.tf`): `output "red_driver"` con `data.docker_network.bridge.driver`.
+
+**2. Formato, validación y plan**
+```
+$ terraform fmt
+
+$ terraform validate
+Success! The configuration is valid.
+
+$ terraform plan
+docker_image.nginx: Refreshing state... [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+data.docker_network.bridge: Reading...
+data.docker_network.bridge: Read complete after 0s [id=e3d165918145111b2b995fe37566e831bc2ceff90ec61158daccf428b57ef190]
+docker_container.web: Refreshing state... [id=7d6227ca8573f7b3a76377e34ce25ea1c3329b2e742380723ddb95dc90dd348d]
+
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+-/+ destroy and then create replacement
+
+Terraform will perform the following actions:
+
+  # docker_container.web must be replaced
+-/+ resource "docker_container" "web" {
+      ~ id   = "7d6227ca8573f7b3a76377e34ce25ea1c3329b2e742380723ddb95dc90dd348d" -> (known after apply)
+        name = "web-g2"
+        ...
+      + labels { # forces replacement
+          + label = "curso"
+          + value = "arquitectura-sw-2"
+        }
+      + labels { # forces replacement
+          + label = "grupo"
+          + value = "2"
+        }
+
+      + upload { # forces replacement
+          + content        = <<-EOT
+                <h1>Hola desde el grupo 2</h1>
+                <p>Desplegado con Terraform por el grupo 2</p>
+            EOT
+          + executable     = false
+          + file           = "/usr/share/nginx/html/index.html"
+            # (6 unchanged attributes hidden)
+        }
+
+        # (1 unchanged block hidden)
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+
+Changes to Outputs:
+  + contenedor = "web-g2"
+  + red_driver = "bridge"
+```
+(Se dejaron los atributos clave del contenedor; el resto pasan a `known after apply` o `null`.)
+
+**Explicación de la revisora (Sara) antes de aprobar:** el contenedor se reemplaza porque los bloques `labels` y `upload` son nuevos y están marcados con `# forces replacement`: Docker no permite agregar etiquetas ni cambiar el archivo inicial de un contenedor ya creado, así que Terraform lo destruye y crea uno nuevo. El nombre (`web-g2`, ahora calculado con `local.nombre`) y el puerto (8080, ahora el `default` de `var.puerto`) no cambian. «Aprobado: 1 a crear, 0 a cambiar, 1 a destruir».
+
+**3. apply y salidas**
+```
+$ terraform apply
+...
+  Enter a value: yes
+
+docker_container.web: Destroying... [id=7d6227ca8573f7b3a76377e34ce25ea1c3329b2e742380723ddb95dc90dd348d]
+docker_container.web: Destruction complete after 1s
+docker_container.web: Creating...
+docker_container.web: Creation complete after 0s [id=7eea8d5d837ce8e1070602dd889b791edd14029d31ae244e56adeb836e118562]
+
+Apply complete! Resources: 1 added, 0 changed, 1 destroyed.
+
+Outputs:
+
+contenedor = "web-g2"
+red_driver = "bridge"
+url = "http://localhost:8080"
+
+$ terraform output
+contenedor = "web-g2"
+red_driver = "bridge"
+url = "http://localhost:8080"
+```
+En http://localhost:8080 la página muestra **«Hola desde el grupo 2»** y debajo «Desplegado con Terraform por el grupo 2».
+
+**4. Exploración con `terraform console`**
+```
+$ terraform console
+> local.nombre
+"web-g2"
+> upper(var.mensaje)
+"HOLA DESDE EL GRUPO 2"
+> format("web-g%02d", var.grupo)
+"web-g02"
+> local.etiquetas
+{
+  "curso" = "arquitectura-sw-2"
+  "grupo" = "2"
+}
+> data.docker_network.bridge.driver
+"bridge"
+> exit
+```
+
+**5. Prueba de la validación (solo plan, sin aplicar)**
+```
+$ terraform plan -var="puerto=9500"
+data.docker_network.bridge: Reading...
+docker_image.nginx: Refreshing state... [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+data.docker_network.bridge: Read complete after 0s [id=e3d165918145111b2b995fe37566e831bc2ceff90ec61158daccf428b57ef190]
+
+Planning failed. Terraform encountered an error while generating this plan.
+
+╷
+│ Error: Invalid value for variable
+│
+│   on variables.tf line 6:
+│    6: variable "puerto" {
+│     ├────────────────
+│     │ var.puerto is 9500
+│
+│ El puerto debe estar entre 8000 y 8999.
+│
+│ This was checked by the validation rule at variables.tf:11,3-13.
+╵
+```
+
+```
+$ terraform plan -var="puerto=8085"
+...
+  # docker_container.web must be replaced
+-/+ resource "docker_container" "web" {
+        name = "web-g2"
+        ...
+      ~ ports {
+          ~ external = 8080 -> 8085 # forces replacement
+            # (3 unchanged attributes hidden)
+        }
+
+        # (3 unchanged blocks hidden)
+    }
+
+Plan: 1 to add, 0 to change, 1 to destroy.
+
+Changes to Outputs:
+  ~ url        = "http://localhost:8080" -> "http://localhost:8085"
+```
+Ninguno de los dos se aplicó: el servidor sigue en el puerto 8080.
+
 ### Respuestas
-1.
-2.
-3.
-4.
+
+**1. `puerto` tiene un default, puede venir de `terraform.tfvars` y se pasó con `-var`. ¿Qué valor gana cuando hay varios?**
+
+Gana el de mayor precedencia. De menor a mayor: el `default` de la variable, las variables de entorno `TF_VAR_puerto`, el archivo `terraform.tfvars`, los archivos `*.auto.tfvars` y, por último, `-var` o `-var-file` en la línea de comandos, que gana sobre todo lo anterior. En nuestro caso `puerto` no está en `terraform.tfvars`, así que normalmente usa el `default` 8080; pero con `-var="puerto=8085"` el plan propuso cambiar el puerto a 8085 y la `url` a `http://localhost:8085`, lo que demuestra que `-var` se impone sobre el `default`.
+
+**2. ¿Qué hizo el bloque `validation` con el puerto 9500? ¿En qué se parece a la idea de Policy as Code?**
+
+Rechazó el valor antes de calcular el plan y antes de tocar Docker: el plan terminó en `Planning failed` con nuestro mensaje «El puerto debe estar entre 8000 y 8999». Ni siquiera llegó a refrescar el contenedor. Se parece a Policy as Code porque es una regla escrita como código que valida la infraestructura **antes de aplicarla** y bloquea automáticamente una configuración no permitida, sin depender de que una persona se dé cuenta. La diferencia es de alcance: `validation` revisa una sola variable dentro de nuestro código, mientras que herramientas como Checkov, OPA o Sentinel aplican políticas de toda la organización sobre cualquier código, por ejemplo «sin buckets públicos».
+
+**3. ¿Terraform creó la red `bridge`? ¿Qué le pasará cuando el grupo ejecute `destroy`?**
+
+No. Es un `data source`: Terraform solo la lee (`data.docker_network.bridge: Reading...` / `Read complete`) y en el plan no aparece como recurso a crear; nunca hubo un `+` para ella. La red `bridge` es la red por defecto que Docker trae al instalarse. Cuando ejecutemos `destroy`, Terraform eliminará solo lo que administra (el contenedor, y la imagen sale de su registro) y la red `bridge` quedará intacta, porque Terraform no la creó y no es suya. Es la idea de la diapositiva: los data sources leen información que ya existe, sin crearla.
+
+**4. ¿Qué ganan con `local.nombre` frente a escribir `"web-g2"` en cada lugar donde se necesita?**
+
+Una sola fuente de verdad. El nombre se calcula una vez a partir de `var.grupo`, así que si cambia el número del grupo basta con modificar `terraform.tfvars` y todos los lugares que usan el nombre (el contenedor, el output `contenedor`) se actualizan solos. Escribiéndolo a mano en cada sitio habría que acordarse de cambiarlo en todos, y un error de digitación en uno solo crearía nombres inconsistentes. Además, el mismo código sirve para cualquier grupo sin editarlo, que es lo que buscan los locals: valores calculados para no repetirse.
 
 ---
 
