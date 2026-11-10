@@ -909,14 +909,269 @@ Una sola fuente de verdad. El nombre se calcula una vez a partir de `var.grupo`,
 
 ---
 
-## Fase 6 · Módulos
+## Fase 6 · Módulos: la receta una sola vez
+
+**Roles en esta fase:** Operadora: Laura · Navegante y Bitácora: Sara · Revisor del plan: Juanjo
 
 ### Evidencias
+
+**1. Estructura del módulo**
+```
+infra/modules/sitio_web/
+├── versions.tf    # declara el origen kreuzwerker/docker
+├── variables.tf   # nombre, mensaje, imagen (default nginx:1.28-alpine), puerto (con validation)
+├── main.tf        # local html, docker_image.this y docker_container.this
+└── outputs.tf     # url y nombre
+```
+El bloque `validation` del puerto se movió de la raíz al módulo.
+
+**2. Uso del módulo desde la raíz** (`infra/main.tf`): se eliminaron `docker_image.nginx` y `docker_container.web` y se agregaron tres llamadas al mismo módulo.
+
+| Módulo | Nombre | Puerto | Mensaje |
+|---|---|---|---|
+| `tienda` | `tienda-g2` | 8081 | Tienda del grupo 2 |
+| `blog` | `blog-g2` | 8082 | Blog del grupo 2 |
+| `docs` | `docs-g2` | 8083 | Documentación del grupo 2 |
+
+**TODO resueltos**
+- **TODO 1** (`main.tf`): módulos `blog` (puerto 8082) y `docs` (puerto 8083), con la misma estructura que `tienda`.
+- **TODO 2** (`outputs.tf`): `output "urls"` con la lista `[module.tienda.url, module.blog.url, module.docs.url]`.
+
+**3. Limpieza de la raíz:** se borraron `local.nombre` y `local.html` de `locals.tf`, las variables `puerto` y `mensaje` de `variables.tf`, la línea `mensaje` de `terraform.tfvars` y los outputs `url` y `contenedor`, que apuntaban a `docker_container.web`. En la raíz quedan las variables `grupo` e `imagen`, el local `etiquetas`, el data source `bridge` y los outputs `red_driver` y `urls`.
+
+**4. init, formato y validación**
+```
+$ terraform init
+Initializing the backend...
+
+Initializing modules...
+- docs in modules\sitio_web
+- tienda in modules\sitio_web
+- blog in modules\sitio_web
+
+Initializing provider plugins...
+- Reusing version 4.6.0 of kreuzwerker/docker from the dependency lock file
+- Using previously-installed kreuzwerker/docker v4.6.0
+
+Terraform has been successfully initialized!
+
+$ terraform fmt -recursive
+terraform.tfvars
+
+$ terraform validate
+Success! The configuration is valid.
+```
+(`fmt` reportó `terraform.tfvars` porque lo reacomodó al borrar la línea `mensaje`.)
+
+**5. plan**
+```
+$ terraform plan
+...
+Terraform used the selected providers to generate the following execution plan. Resource actions are indicated with the following symbols:
+  + create
+  - destroy
+
+Terraform will perform the following actions:
+
+  # docker_container.web will be destroyed
+  # (because docker_container.web is not in configuration)
+  - resource "docker_container" "web" {
+      - name = "web-g2" -> null
+      ...
+    }
+
+  # docker_image.nginx will be destroyed
+  # (because docker_image.nginx is not in configuration)
+  - resource "docker_image" "nginx" {
+      - name = "nginx:1.28-alpine" -> null
+      ...
+    }
+
+  # module.blog.docker_container.this will be created
+  + resource "docker_container" "this" {
+      + name = "blog-g2"
+      ...
+      + ports {
+          + external = 8082
+          + internal = 80
+        }
+      + upload {
+          + content = <<-EOT
+                <h1>Blog del grupo 2</h1>
+                <p>Sitio blog-g2, desplegado con Terraform</p>
+            EOT
+          + file    = "/usr/share/nginx/html/index.html"
+        }
+    }
+
+  # module.blog.docker_image.this will be created
+  + resource "docker_image" "this" {
+      + keep_locally = true
+      + name         = "nginx:1.28-alpine"
+    }
+
+  # module.docs.docker_container.this will be created
+  + resource "docker_container" "this" {
+      + name = "docs-g2"
+      ... (puerto 8083)
+    }
+
+  # module.docs.docker_image.this will be created
+
+  # module.tienda.docker_container.this will be created
+  + resource "docker_container" "this" {
+      + name = "tienda-g2"
+      ... (puerto 8081)
+    }
+
+  # module.tienda.docker_image.this will be created
+
+Plan: 6 to add, 0 to change, 2 to destroy.
+
+Changes to Outputs:
+  - contenedor = "web-g2" -> null
+  - url        = "http://localhost:8080" -> null
+  + urls       = [
+      + "http://localhost:8081",
+      + "http://localhost:8082",
+      + "http://localhost:8083",
+    ]
+```
+(Plan resumido: los atributos de cada recurso se recortaron con `...`.)
+
+**Explicación del revisor (Juanjo) antes de aprobar:** se destruyen 2 recursos de la raíz, `docker_container.web` y `docker_image.nginx`, porque ya no están en el código (`not in configuration`). Se crean 6: una imagen y un contenedor dentro de cada uno de los tres módulos. «Aprobado: 6 a crear, 0 a cambiar, 2 a destruir».
+
+**6. apply y verificación**
+```
+$ terraform apply
+...
+  Enter a value: yes
+
+module.tienda.docker_image.this: Creating...
+module.blog.docker_image.this: Creating...
+docker_container.web: Destroying... [id=7eea8d5d837ce8e1070602dd889b791edd14029d31ae244e56adeb836e118562]
+module.docs.docker_image.this: Creating...
+module.blog.docker_image.this: Creation complete after 0s [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+module.tienda.docker_image.this: Creation complete after 0s [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+module.docs.docker_image.this: Creation complete after 0s [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+module.blog.docker_container.this: Creating...
+module.tienda.docker_container.this: Creating...
+module.docs.docker_container.this: Creating...
+docker_container.web: Destruction complete after 1s
+docker_image.nginx: Destroying... [id=sha256:dc73b49f5124cf2ee538dfbdfbd121f0b4ccdcb20fea30f3a81bd477c02e2bb5nginx:1.28-alpine]
+docker_image.nginx: Destruction complete after 0s
+module.docs.docker_container.this: Creation complete after 1s [id=b014c868e79f09944f09dcd29cff86e24b0dc6cbea458a2ba827c234211ad095]
+module.tienda.docker_container.this: Creation complete after 1s [id=1a5648f8d42db1662e74c60e3a56f785ad55b384c7b663be02f3650bd8fc4224]
+module.blog.docker_container.this: Creation complete after 1s [id=1ba5a1f3bfcf4de8237e93d332ade8a960a6a268bba9fc91511864202f0eba6c]
+
+Apply complete! Resources: 6 added, 0 changed, 2 destroyed.
+
+Outputs:
+
+red_driver = "bridge"
+urls = [
+  "http://localhost:8081",
+  "http://localhost:8082",
+  "http://localhost:8083",
+]
+
+$ terraform output urls
+[
+  "http://localhost:8081",
+  "http://localhost:8082",
+  "http://localhost:8083",
+]
+
+$ docker ps
+CONTAINER ID   IMAGE          COMMAND                  CREATED              STATUS              PORTS                  NAMES
+1ba5a1f3bfcf   dc73b49f5124   "/docker-entrypoint.…"   About a minute ago   Up About a minute   0.0.0.0:8082->80/tcp   blog-g2
+1a5648f8d42d   dc73b49f5124   "/docker-entrypoint.…"   About a minute ago   Up About a minute   0.0.0.0:8081->80/tcp   tienda-g2
+b014c868e79f   dc73b49f5124   "/docker-entrypoint.…"   About a minute ago   Up About a minute   0.0.0.0:8083->80/tcp   docs-g2
+```
+Como el recurso de imagen tiene `keep_locally = true`, destruir `docker_image.nginx` solo lo sacó del state: la imagen `nginx:1.28-alpine` siguió en Docker y los tres módulos la reutilizaron (mismo id `dc73b49f5124`).
+
+**7. Hallazgo: la tilde se veía mal en «Documentación»**
+
+En http://localhost:8083 el título se veía como «DocumentaciÃ³n del grupo 2»: la página no declaraba su codificación y el navegador interpretaba la «ó» (UTF-8) con otra codificación. Lo corregimos agregando `<meta charset="utf-8">` al `local.html` **solo en `modules/sitio_web/main.tf`**:
+```hcl
+locals {
+  html = <<-EOT
+    <meta charset="utf-8">
+    <h1>${var.mensaje}</h1>
+    <p>Sitio ${var.nombre}, desplegado con Terraform</p>
+  EOT
+}
+```
+
+```
+$ terraform plan
+...
+  # module.blog.docker_container.this must be replaced
+-/+ resource "docker_container" "this" {
+        name = "blog-g2"
+        ...
+      - upload { # forces replacement
+          - content = <<-EOT
+                <h1>Blog del grupo 2</h1>
+                <p>Sitio blog-g2, desplegado con Terraform</p>
+            EOT -> null
+        }
+      + upload { # forces replacement
+          + content = <<-EOT
+                <meta charset="utf-8">
+                <h1>Blog del grupo 2</h1>
+                <p>Sitio blog-g2, desplegado con Terraform</p>
+            EOT
+        }
+    }
+
+  # module.docs.docker_container.this must be replaced
+  (mismo cambio en upload, con «Documentación del grupo 2»)
+
+  # module.tienda.docker_container.this must be replaced
+  (mismo cambio en upload, con «Tienda del grupo 2»)
+
+Plan: 3 to add, 0 to change, 3 to destroy.
+```
+**Aprobación del revisor (Juanjo):** «Aprobado: 3 a crear, 0 a cambiar, 3 a destruir; solo se reemplazan los contenedores por el cambio del `upload`, las imágenes no se tocan».
+
+```
+$ terraform apply
+...
+module.docs.docker_container.this: Destroying... [id=b014c868e79f09944f09dcd29cff86e24b0dc6cbea458a2ba827c234211ad095]
+module.tienda.docker_container.this: Destroying... [id=1a5648f8d42db1662e74c60e3a56f785ad55b384c7b663be02f3650bd8fc4224]
+module.blog.docker_container.this: Destroying... [id=1ba5a1f3bfcf4de8237e93d332ade8a960a6a268bba9fc91511864202f0eba6c]
+module.docs.docker_container.this: Destruction complete after 1s
+module.docs.docker_container.this: Creating...
+module.blog.docker_container.this: Destruction complete after 1s
+module.blog.docker_container.this: Creating...
+module.tienda.docker_container.this: Destruction complete after 1s
+module.tienda.docker_container.this: Creating...
+module.blog.docker_container.this: Creation complete after 1s [id=30384dfbb5a957eae1ac9fc3a69f8fce48cfb616c03d3a3bb167e3204e80398e]
+module.docs.docker_container.this: Creation complete after 1s [id=7cbaaf8a0b754460a450d52d417e6c9590df08bfd1d3d72da257b784d2b0318f]
+module.tienda.docker_container.this: Creation complete after 1s [id=6c785acff042fb2b9ede311266dae554130962efeed4c71b14bf1b92e78d00d3]
+
+Apply complete! Resources: 3 added, 0 changed, 3 destroyed.
+```
+Ahora http://localhost:8083 muestra «Documentación del grupo 2» correctamente, y los puertos 8081 y 8082 muestran la tienda y el blog.
+
 ### Respuestas
-1.
-2.
-3.
-4.
+
+**1. Anoten la línea `Plan:` del paso 8. ¿Qué se destruyó, qué se creó y por qué?**
+
+`Plan: 6 to add, 0 to change, 2 to destroy.` Se destruyeron los dos recursos de la raíz, `docker_container.web` (el sitio `web-g2` en el puerto 8080) y `docker_image.nginx`, porque los borramos del código y Terraform lo indicó con `because ... is not in configuration`. Se crearon seis: `docker_image.this` y `docker_container.this` dentro de cada módulo (`module.tienda`, `module.blog` y `module.docs`). Terraform identifica cada recurso por su dirección; al pasar el servidor a un módulo, la dirección cambió (de `docker_container.web` a `module.tienda.docker_container.this`), así que para Terraform el viejo desapareció y los nuevos son otros recursos. Lo que no se destruyó fue la imagen en Docker: con `keep_locally = true` solo salió del state, y los tres módulos la reutilizaron.
+
+**2. ¿Qué error obtendrían si el módulo no tuviera `versions.tf`?**
+
+`terraform init` fallaría con `Failed to query available provider packages`, mencionando `hashicorp/docker`. Cuando un módulo usa recursos `docker_*` sin declarar el origen del provider, Terraform asume que viene del espacio de nombres oficial `hashicorp/` y busca `hashicorp/docker`, que no existe. El `versions.tf` le indica que el provider correcto es `kreuzwerker/docker`, el mismo de la raíz, y así ambos comparten la configuración del provider.
+
+**3. Si mañana hay que agregar una etiqueta a todos los sitios, ¿cuántos archivos tocan con módulo? ¿Cuántos bloques habrían tocado copiando y pegando?**
+
+Con módulo se toca **un solo archivo**: `modules/sitio_web/main.tf`, agregando el bloque `labels` en `docker_container.this`, y el cambio llega a los tres sitios. Lo comprobamos en esta misma fase con el `<meta charset="utf-8">`: editamos solo el módulo y el plan reemplazó los tres contenedores (`3 to add, 3 to destroy`). Copiando y pegando habría que tocar **tres bloques** `docker_container`, uno por sitio, y cada sitio nuevo sumaría otro bloque. Es lo que dice la diapositiva de módulos: sin ellos, un cambio hay que hacerlo en N lugares y cada copia se desincroniza con el tiempo.
+
+**4. ¿Qué necesitaría otro grupo para usar su módulo sin copiar la carpeta?**
+
+Que el módulo esté publicado en un lugar accesible y referenciarlo en su `source`. La forma más simple es subir nuestro repositorio a GitHub y que ellos usen `source = "git::https://github.com/<usuario>/iac-taller-g2.git//infra/modules/sitio_web?ref=v1.0"`, donde `//` indica la subcarpeta y `ref` fija una versión (un tag de Git) para que nuestros cambios futuros no los afecten sin aviso. También se podría publicar en un registro de módulos (el Terraform Registry o uno privado). Además, el módulo debe ser autocontenido y documentado: `versions.tf` con el provider, variables con `description` y `validation`, outputs claros y un README que explique cómo usarlo. Luego ellos ejecutan `terraform init` y Terraform lo descarga.
 
 ---
 
