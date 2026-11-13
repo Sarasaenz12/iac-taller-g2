@@ -1179,7 +1179,7 @@ Que el módulo esté publicado en un lugar accesible y referenciarlo en su `sour
 
 **Roles en esta fase:** Operadora: Sara · Navegante y Bitácora: Juanjo · Revisora del plan: Laura
 
-> 🔒 **Sobre la contraseña del backend:** no usamos la contraseña de ejemplo de la guía; elegimos una propia solo para el taller. En toda esta bitácora aparece como `****`. Nunca se escribió en ningún archivo del repositorio: vive solo en la variable de entorno `PG_CONN_STR` de la terminal y en el contenedor del backend. **Grupo auditor:** para comprobar que no está en el historial, pídannos la contraseña y búsquenla con `git log -p -S "<contraseña>"`; buscar `cambia-esta-clave` siempre dará vacío.
+> 🔒 **Sobre la contraseña del backend:** no usamos la contraseña de ejemplo de la guía; elegimos una propia solo para el taller. En toda esta bitácora aparece como `****`. Nunca se escribió en ningún archivo del repositorio: vive solo en la variable de entorno `PG_CONN_STR` de la terminal y en el contenedor del backend. **Grupo auditor:** para comprobar que no está en el historial, pídannos la contraseña y búsquenla con `git log -p -S "<contraseña>"`. Buscar la contraseña de ejemplo de la guía no sirve para auditarnos, porque no la usamos.
 
 ### Parte A · State remoto con bloqueo
 
@@ -1775,8 +1775,149 @@ Va en el paso **2 · Validar**, donde el pipeline corre `fmt`, `validate`, el pl
 
 ## Fase 9 · Auditoría cruzada y cierre
 
-### Evidencias
+**Roles en esta fase:** Operadora: Laura · Navegante y Bitácora: Sara · Revisor del plan: Juanjo
+
+### Parte A · Auditoría
+
+**1. Intercambio de repositorios.** Se realizo el cambiom con el **Grupo 5** (Susana Eguis Muñoz y Samuel Tabares). Nosotros auditamos https://github.com/suueguis/iac-taller-g5 y ellos auditaron el nuestro, https://github.com/Sarasaenz12/iac-taller-g2.
+
+**2 y 3. Nuestra auditoría al Grupo 5.** Está completa en [`AUDITORIA.md`](AUDITORIA.md), con la evidencia de cada fila, y se la compartimos al Grupo 5. Resumen:
+
+| Anti-patrón | Resultado |
+|---|---|
+| Tocar a mano | Cumple |
+| State sin proteger | Cumple |
+| Copiar y pegar | Cumple |
+| Secretos en el código | Cumple, con una reserva (no pudimos buscar su contraseña real) |
+| Aplicar sin leer el plan | Cumple |
+| Un solo archivo gigante | Cumple |
+
+Hallazgos: (1) código muerto (`local.etiquetas` y la variable raíz `imagen` sin uso) y las `labels` de la Fase 5 que se perdieron al pasar al módulo; (2) la evidencia de secretos y del bloqueo no se puede reproducir tal como está escrita, porque los comandos usan el marcador `<CLAVE>`. Recomendación: conectar las etiquetas a través del módulo, borrar la variable sin uso y agregar `tflint` a `validar.sh` para que detecte declaraciones sin uso.
+
+**Auditoría que nos hizo el Grupo 5** (su `AUDITORIA.md`, sobre nuestro commit `43c4a00`):
+
+| Anti-patrón | Resultado que nos dieron |
+|---|---|
+| Tocar a mano | Cumple |
+| State sin proteger | Cumple |
+| Copiar y pegar | Cumple |
+| Secretos en el código | Cumple, con una reserva (no tienen nuestra contraseña real) |
+| Aplicar sin leer el plan | **No cumple, en dos puntos** |
+| Un solo archivo gigante | Cumple |
+
+**Nuestra respuesta a sus hallazgos:**
+
+- **Hallazgo 1, `apply` sin aprobación anotada.** Tienen razón en los dos puntos. En la Fase 3, el `terraform apply` sin cambios (`No changes`) no tiene anotada la aprobación del revisor. En la Fase 8, la prueba `despliegue_real` de `terraform test` crea y destruye un contenedor de verdad, y `terraform test` no muestra ninguna línea `Plan:` que el revisor pueda leer. No vamos a agregar aprobaciones a fases pasadas: la bitácora debe mostrar lo que de verdad quedó registrado. Desde esta fase anotamos el `Plan:` y la aprobación de cada `destroy` (Parte B).
+- **Hallazgo 2, la nota de la contraseña.** También tienen razón: nuestra nota de la Fase 7 decía que buscar la contraseña de ejemplo de la guía «siempre dará vacío», pero la nota misma escribía ese texto, así que el comando de la guía sí devolvía el commit `838b57d`. Corregimos la nota para que ya no lo escriba. El commit `838b57d` lo conserva en el historial, y no lo reescribimos porque el repositorio ya estaba publicado y compartido con ellos. No es una fuga: nuestra contraseña real no aparece en ningún commit.
+- **Detalles menores que vieron.** Coinciden con lo que les encontramos a ellos: también tenemos `local.etiquetas` y la variable raíz `imagen` sin uso, y nuestras `labels` de la Fase 5 se perdieron al pasar al módulo en la Fase 6. Además, `validar.sh` está guardado sin permiso de ejecución, no tenemos `.gitattributes` para fijar los saltos de línea a LF y el `host` de Docker deja el código atado a Windows. Encontrar en ellos el mismo error que teníamos nosotros fue lo más útil de la auditoría.
+
+### Parte B · Cierre
+
+**4. Destrucción de cada ambiente.** Al retomar la sesión, el computador se había reiniciado y Docker Desktop estaba cerrado, así que los contenedores del taller estaban detenidos (`Exited (255)`). El primer intento falló porque el backend también estaba detenido:
+```
+$ terraform workspace select dev && terraform destroy
+╷
+│ Error: dial tcp [::1]:5433: connectex: No connection could be made because the target machine actively refused it.
+╵
+```
+Sin el backend, Terraform no pudo leer el state ni saber qué destruir. Encendimos el backend y repetimos:
+```
+$ docker start tf-state-g2
+tf-state-g2
+```
+
+*dev*
+```
+$ terraform workspace select dev && terraform destroy
+Switched to workspace "dev".
+...
+  # module.sitio["tienda"].docker_container.this will be destroyed
+  # module.sitio["tienda"].docker_image.this will be destroyed
+
+Plan: 0 to add, 0 to change, 2 to destroy.
+
+Do you really want to destroy all resources in workspace "dev"?
+  Terraform will destroy all your managed infrastructure, as shown above.
+  There is no undo. Only 'yes' will be accepted to confirm.
+
+  Enter a value: yes
+
+module.sitio["tienda"].docker_container.this: Destruction complete after 0s
+module.sitio["tienda"].docker_image.this: Destruction complete after 0s
+
+Destroy complete! Resources: 2 destroyed.
+```
+**Juanjo:** «Workspace dev: aprobado 0 a crear, 0 a cambiar, 2 a destruir (el contenedor `tienda-g2-dev` y su imagen)».
+
+*staging*
+```
+$ terraform workspace select staging && terraform destroy
+Switched to workspace "staging".
+...
+  # module.sitio["blog"], ["docs"] y ["tienda"]: docker_container.this y docker_image.this will be destroyed
+
+Plan: 0 to add, 0 to change, 6 to destroy.
+
+Do you really want to destroy all resources in workspace "staging"?
+  Enter a value: yes
+...
+Destroy complete! Resources: 6 destroyed.
+```
+**Juanjo:** «Workspace staging: aprobado 0 a crear, 0 a cambiar, 6 a destruir (3 contenedores y 3 imágenes)».
+
+*prod*
+```
+$ terraform workspace select prod && terraform destroy
+Switched to workspace "prod".
+...
+  # module.sitio["blog"], ["docs"] y ["tienda"]: docker_container.this y docker_image.this (nginx:1.27-alpine) will be destroyed
+
+Plan: 0 to add, 0 to change, 6 to destroy.
+
+Do you really want to destroy all resources in workspace "prod"?
+  Enter a value: yes
+...
+Destroy complete! Resources: 6 destroyed.
+
+$ terraform workspace select default
+Switched to workspace "default".
+```
+**Juanjo:** «Workspace prod: aprobado 0 a crear, 0 a cambiar, 6 a destruir (3 contenedores y 3 imágenes con nginx 1.27)».
+
+(Los planes de destrucción se resumieron: se dejó qué recurso se destruye y la línea `Plan:`.) No importó que los sitios estuvieran detenidos: el plan los mostraba con `must_run = false` y `exit_code = 255`, y `destroy` los eliminó igual.
+
+**5. Verificación: solo queda el backend**
+```
+$ docker ps -a
+CONTAINER ID   IMAGE                     COMMAND                  CREATED        STATUS                      PORTS                    NAMES
+90237a106fc2   postgres:17-alpine        "docker-entrypoint.s…"   3 days ago     Up 46 seconds               0.0.0.0:5433->5432/tcp   tf-state-g2
+...
+```
+Del grupo solo queda `tf-state-g2`; ya no hay ningún `tienda-g2-*`, `blog-g2-*`, `docs-g2-*`, `web-g2` ni `clickops-g2`. (Se omitieron las líneas de contenedores de otros proyectos de este computador, que no son del taller.)
+
+**6. Eliminación del backend** (solo después de los tres `destroy`)
+```
+$ docker rm -f tf-state-g2
+tf-state-g2
+
+$ docker ps -a | grep g2
+
+$
+```
+`docker ps -a | grep g2` no devolvió ninguna línea: ya no queda ningún contenedor del grupo, ni siquiera el backend. **Punto de control cumplido.**
+
 ### Respuestas
-1.
-2.
-3.
+
+**1. ¿Qué anti-patrón encontraron en el otro grupo? ¿Y cuál les señalaron a ustedes?**
+
+Al Grupo 5 no le encontramos ningún anti-patrón incumplido: los seis cumplen, el de secretos con la reserva de que no pudimos buscar su contraseña real. Nuestros hallazgos fueron de calidad del código: dejaron declaraciones sin uso y las etiquetas de la Fase 5 se perdieron al pasar al módulo, y su evidencia de secretos y bloqueo no se puede reproducir tal como está escrita. A nosotros nos señalaron **«Aplicar sin leer el plan»** en dos puntos: el `apply` sin cambios de la Fase 3 sin aprobación anotada y la prueba `despliegue_real` de la Fase 8, que despliega de verdad sin `Plan:` ni aprobación. También que nuestra nota sobre la contraseña de ejemplo la escribía, y por eso el comando de la guía devolvía un resultado. Los dos hallazgos son correctos; la respuesta está arriba.
+
+**2. ¿Qué habría pasado si eliminaban el contenedor del backend antes de ejecutar los `destroy`?**
+
+Se habría perdido el state de los tres ambientes, porque vivía dentro de ese contenedor de PostgreSQL. Sin state, Terraform ya no sabe qué recursos creó: o falla al conectarse, o con un backend nuevo y vacío cree que no hay nada que destruir. Los siete sitios habrían quedado huérfanos, corriendo sin que ninguna herramienta los administre, y la única forma de quitarlos sería borrarlos a mano con `docker rm -f`, que es justo el anti-patrón «Tocar a mano». Lo vivimos en pequeño en esta fase: con el backend solo detenido, el primer `destroy` falló con `connection refused`, y Terraform no pudo hacer nada hasta que volvimos a encender `tf-state-g2`. Si lo hubiéramos borrado, no habría habido forma de encenderlo. En una nube real sería peor: recursos olvidados que siguen cobrando y que nadie sabe que existen.
+
+**3. ¿Por qué `destroy` exige la misma disciplina de lectura que `apply`?**
+
+Porque también cambia la infraestructura real, y no tiene vuelta atrás: el propio Terraform lo advierte con «There is no undo». Un `destroy` en el workspace equivocado borra producción en lugar de dev, y como el código es el mismo para los tres ambientes, lo único que lo distingue es leer el workspace que muestra la pregunta («in workspace "prod"») y la cuenta del plan. Por eso Juanjo confirmó, antes de cada `yes`, el workspace y que la cifra coincidiera con lo que esperábamos (2, 6 y 6). En un proyecto real, `destroy` también se lleva datos: una base de datos destruida no se recrea con otro `apply`. Un `apply` mal leído casi siempre se corrige con otro `apply`; un `destroy` mal leído, no.
+
+---

@@ -1,6 +1,8 @@
 # Auditoría del repositorio `iac-taller-g5`
 
-**Repositorio auditado:** https://github.com/suueguis/iac-taller-g5 (rama `main`, último commit `68e15c7`, `fase-9: auditoría y cierre`).
+**Grupo auditor:** Grupo 2 (Sara Valentina Sanchez Estrada, Juanjo y Laura) · repositorio `iac-taller-g2`.
+**Grupo auditado:** Grupo 5.
+**Repositorio auditado:** https://github.com/suueguis/iac-taller-g5 (rama `main`, commit `68e15c7`, `fase-9: auditoría y cierre`). Después de la auditoría subieron el commit `9962438`, que solo cambia una línea de su `BITACORA.md` (su respuesta sobre la auditoría que nos hicieron); los hallazgos y los números de línea siguen siendo válidos.
 **Cómo se hizo:** se clonó en una carpeta aparte y se leyó sin modificar nada. No se ejecutó `terraform`, `docker`, `checkov` ni `validar.sh`: todo sale de los archivos, el historial de Git y los comandos de la tabla de la Fase 9. La `BITACORA.md` (1981 líneas) se revisó con búsquedas dirigidas (`Plan:`, `Aprobado`, `docker`, `apply`, `destroy`, secretos), no línea por línea. Donde algo no se pudo comprobar, se dice.
 
 ## Resultado por anti-patrón
